@@ -1,5 +1,11 @@
 # mcpdrain
 
+[![crates.io](https://img.shields.io/crates/v/mcpdrain.svg)](https://crates.io/crates/mcpdrain)
+[![downloads](https://img.shields.io/crates/d/mcpdrain.svg)](https://crates.io/crates/mcpdrain)
+[![CI](https://github.com/patchwright/mcpdrain/actions/workflows/ci.yml/badge.svg)](https://github.com/patchwright/mcpdrain/actions/workflows/ci.yml)
+[![license](https://img.shields.io/crates/l/mcpdrain.svg)](LICENSE)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-blue.svg)](https://www.rust-lang.org)
+
 > Your MCP server doesn't hang because it's broken — it hangs because OS pipe buffers are tiny. `mcpdrain` is the single binary that sits between your client and server and makes the hang impossible.
 
 `mcpdrain` is a **deadlock-proof stdio guardian for MCP (Model Context Protocol) servers.** Drop it between any MCP client and any stdio MCP server: it concurrently drains stdin, stdout, **and** stderr so the server can never block on a full pipe buffer, and it recovers from client-side stalls.
@@ -47,7 +53,48 @@ claude-code --mcp-server "npx -y @modelcontextprotocol/server-filesystem /repo"
 mcpdrain run -- npx -y @modelcontextprotocol/server-filesystem /repo
 ```
 
-Point your client at the `mcpdrain run -- <server>` command in your MCP config (Claude Code, Cursor, Codex CLI, Windsurf, Claude Desktop — any of them). It is transparent: bytes flow through untouched.
+## Use it with your MCP client
+
+Every stdio MCP client configures servers the same way — a `command` plus
+`args`. To protect a server, set `command` to `mcpdrain` and prepend
+`"run", "--"` to whatever you had. Nothing else changes; mcpdrain is transparent.
+
+**Before** (`claude_desktop_config.json`, `.cursor/mcp.json`, `mcp.json`, …):
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
+    }
+  }
+}
+```
+
+**After** — wrap it:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "mcpdrain",
+      "args": ["run", "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
+    }
+  }
+}
+```
+
+The same `command` → `mcpdrain`, `args` → `["run", "--", <old command>, <old args…>]`
+rule works for **Claude Desktop, Claude Code, Cursor, Windsurf, Codex CLI**, and
+anything else that speaks MCP over stdio. mcpdrain forwards stdin/stdout
+untouched and passes the server's stderr through to its own, so your logs stay
+visible while the deadlock is gone. It also propagates the server's exit code, so
+a crashed server is still a visible failure rather than a silent success.
+
+It works with **any** stdio MCP server — there is nothing to register and no
+per-server support; if your client launches it as a subprocess, mcpdrain can wrap
+it.
 
 ```bash
 # Diagnose a hang:
@@ -63,19 +110,19 @@ mcpdrain run --stall 10 --restart eager -- <your-server>
 The #1 cause of the hang is an **undrained stderr**: the client reads stdout, the server fills the stderr pipe, the server blocks writing stderr, never finishes stdout, and the client waits forever.
 
 ```
-client stdin  ─►  mcpdrain  ─►  server stdin
-client stdout ◄─  mcpdrain  ◄─  server stdout   (spooled: never blocks the server)
-                 mcpdrain  ◄─  server stderr    (always drained → ring buffer)
+client stdin   ─►  mcpdrain  ─►  server stdin
+client stdout  ◄─  mcpdrain  ◄─  server stdout   (spooled: never blocks the server)
+operator stderr ◄─ mcpdrain  ◄─  server stderr   (always drained, then forwarded)
 ```
 
-`mcpdrain` runs a dedicated reader for **each** stream so the server can never block, decouples server-drain from client-write with a bounded spool, and watches the client-facing write: if it stalls for longer than `--stall` seconds, `mcpdrain` aborts the deadlocked server (with diagnostics) instead of hanging forever.
+`mcpdrain` runs a dedicated reader for **each** stream so the server can never block, decouples server-drain from client-write with a bounded spool, and watches the client-facing write: if it stalls for longer than `--stall` seconds, `mcpdrain` aborts the deadlocked server (with diagnostics) instead of hanging forever. The server's stderr is always drained (that is what prevents the deadlock) and then forwarded to mcpdrain's own stderr, so logs are never lost. On exit, mcpdrain returns the server's exit code (`128 + signal` if it was signaled); on `SIGINT`/`SIGTERM` it tears the server down cleanly instead of orphaning it.
 
-## What's intentionally not in v0.1
+## Scope and roadmap
 
 - **Not an MCP server.** ~52% of published MCP servers are already abandoned; `mcpdrain` is infrastructure you run, not another server to register.
 - **No plugin system / GUI / polyglot bindings.** It's a process you run. The core is a trait-based library crate so these are additive later.
-- **Windows is best-effort.** POSIX pipe semantics (where the documented hangs live) ship first; named-pipe support is tracked for v0.2.
-- **No request replay yet.** v0.2 adds `mcpdrain replay` for session capture/replay (handy for audit/debugging).
+- **Linux + macOS today; Windows next.** POSIX pipe semantics (where the documented hangs live) ship first; named-pipe support is the main item tracked for a later release.
+- **No request replay yet.** A future `mcpdrain replay` will capture/replay a session (handy for audit/debugging); the session-capture config is already wired.
 
 ## Development
 
@@ -90,7 +137,8 @@ The credibility test (`crates/mcpdrain-core/tests/deadlock.rs`) spawns a server 
 
 ## Status
 
-Pre-release. v0.1 scope: `run` + `doctor`. See [CHANGELOG.md](CHANGELOG.md).
+v0.2 — `run` + `doctor`, with stderr passthrough, exit-code propagation, and
+signal-clean shutdown. See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

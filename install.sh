@@ -32,13 +32,35 @@ else
   [ -n "$tag" ] || { echo "mcpdrain: could not determine latest release" >&2; exit 1; }
 fi
 
-url="https://github.com/${OWNER}/${REPO}/releases/download/${tag}/mcpdrain-${target}.tar.gz"
+base="https://github.com/${OWNER}/${REPO}/releases/download/${tag}"
+asset="mcpdrain-${target}.tar.gz"
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 
 echo "mcpdrain: downloading ${tag} for ${target}…"
-curl -fsSL "$url" | tar -xzf - -C "$tmpdir"
+curl -fsSL "${base}/${asset}" -o "${tmpdir}/${asset}"
 
+# Verify against the release SHA256SUMS.txt when present (best-effort: older
+# releases may not ship one). A present-but-mismatching sum is fatal.
+if curl -fsSL "${base}/SHA256SUMS.txt" -o "${tmpdir}/SHA256SUMS.txt" 2>/dev/null; then
+  want=$(grep " ${asset}\$" "${tmpdir}/SHA256SUMS.txt" | awk '{print $1}')
+  if [ -n "$want" ]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+      got=$(sha256sum "${tmpdir}/${asset}" | awk '{print $1}')
+    else
+      got=$(shasum -a 256 "${tmpdir}/${asset}" | awk '{print $1}')
+    fi
+    if [ "$want" != "$got" ]; then
+      echo "mcpdrain: checksum mismatch for ${asset}" >&2
+      echo "  expected $want" >&2
+      echo "  got      $got" >&2
+      exit 1
+    fi
+    echo "mcpdrain: checksum verified."
+  fi
+fi
+
+tar -xzf "${tmpdir}/${asset}" -C "$tmpdir"
 mkdir -p "$INSTALL_DIR"
 mv "$tmpdir/mcpdrain-${target}" "${INSTALL_DIR}/mcpdrain"
 chmod +x "${INSTALL_DIR}/mcpdrain"

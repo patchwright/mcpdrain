@@ -60,7 +60,14 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS.txt
           generate_release_notes: true
