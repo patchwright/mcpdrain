@@ -10,6 +10,15 @@
 
 `mcpdrain` is a **deadlock-proof stdio guardian for MCP (Model Context Protocol) servers.** Drop it between any MCP client and any stdio MCP server: it concurrently drains stdin, stdout, **and** stderr so the server can never block on a full pipe buffer, and it recovers from client-side stalls.
 
+## Is this your hang?
+
+- Your **MCP server hangs** and the client just says "Running…" forever, with no error.
+- `tools/list` **never returns**, or your tools are **never registered** in Claude Code / Cursor / Claude Desktop / Windsurf.
+- It works in the MCP inspector but **hangs in the real client**, or it hangs **intermittently** and a restart fixes it.
+- The server is chatty on **stderr**, or returns a **large `tools/list` / big response**.
+
+If any of these sound familiar, it is almost certainly the OS **pipe-buffer deadlock** below — not a bug in your server. `mcpdrain run -- <your server>` fixes it without changing your server or client.
+
 ## The 8 KB problem
 
 Every stdio MCP server hangs forever the moment a response exceeds the OS pipe capacity while the client isn't concurrently draining **every** stream. The pipe capacities are small and baked into the kernel:
