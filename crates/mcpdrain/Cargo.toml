@@ -12,7 +12,7 @@ name = "mcpdrain"
 path = "src/main.rs"
 
 [dependencies]
-mcpdrain-core = { path = "../mcpdrain-core", version = "0.1.0" }
+mcpdrain-core = { path = "../mcpdrain-core", version = "0.2.0" }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

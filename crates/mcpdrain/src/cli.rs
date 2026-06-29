@@ -74,9 +74,20 @@ pub async fn run() -> std::io::Result<ExitCode> {
                      client likely deadlocked; restart it, or re-run with --restart never to \
                      inspect."
                 );
-                Ok(ExitCode::from(2))
-            } else {
-                Ok(ExitCode::SUCCESS)
+                return Ok(ExitCode::from(2));
+            }
+            if stats.interrupted {
+                // Interrupted by SIGINT/SIGTERM: shell convention is 128 + signal.
+                return Ok(ExitCode::from(130));
+            }
+            // Transparent wrapper: surface the server's own exit code so a client
+            // or CI can tell a crashed/failed server from a clean one.
+            match stats.server_exit_code {
+                Some(code) if code != 0 => {
+                    eprintln!("mcpdrain: server exited with code {code}");
+                    Ok(ExitCode::from(code as u8))
+                }
+                _ => Ok(ExitCode::SUCCESS),
             }
         }
         Cmd::Doctor => {

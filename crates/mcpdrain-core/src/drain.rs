@@ -41,6 +41,12 @@ pub struct ProxyStats {
     pub stalled: bool,
     /// Number of times the server was respawned (v0.1: always 0).
     pub restarts: u32,
+    /// The server's own exit code if it exited by itself (`128 + signal` when it
+    /// was killed by a signal, mirroring the shell). `None` when mcpdrain tore it
+    /// down (stall abort, or a signal to mcpdrain) — that is not a server failure.
+    pub server_exit_code: Option<i32>,
+    /// True if mcpdrain itself received SIGINT/SIGTERM and shut the server down.
+    pub interrupted: bool,
 }
 
 struct ChildIo {
@@ -76,9 +82,17 @@ fn spawn_child(config: &Config) -> std::io::Result<ChildIo> {
     })
 }
 
-/// Entry point for the `mcpdrain` binary: proxy process stdin/stdout.
+/// Entry point for the `mcpdrain` binary: proxy process stdin/stdout, and
+/// forward the server's stderr through to mcpdrain's own stderr (drained, so it
+/// can never deadlock, but still visible to the operator).
 pub async fn run(config: Config) -> std::io::Result<ProxyStats> {
-    proxy(tokio::io::stdin(), tokio::io::stdout(), config).await
+    proxy(
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+        tokio::io::stderr(),
+        config,
+    )
+    .await
 }
 
 /// Proxy a client's stdin/stdout to a spawned MCP server, draining every server
@@ -86,14 +100,19 @@ pub async fn run(config: Config) -> std::io::Result<ProxyStats> {
 ///
 /// - `client_in`  — bytes the client sends (requests) → forwarded to the server.
 /// - `client_out` — bytes the server emits (responses) → forwarded to the client.
-pub async fn proxy<R, W>(
+/// - `client_err` — the server's stderr is drained (always) and forwarded here,
+///   so logs stay visible. Forwarding is best-effort: if this sink errors, the
+///   stream is still drained to keep the deadlock guarantee.
+pub async fn proxy<R, W, E>(
     client_in: R,
     mut client_out: W,
+    client_err: E,
     config: Config,
 ) -> std::io::Result<ProxyStats>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
+    E: AsyncWrite + Unpin + Send + 'static,
 {
     let mut stats = ProxyStats::default();
     let stall_timeout = config.stall_timeout;
@@ -112,17 +131,28 @@ where
     } = spawn_child(&config)?;
     tracing::info!(target: "mcpdrain", pid = child.id(), "spawned server");
 
-    // --- drain stderr unconditionally: undrained stderr is the #1 deadlock cause
+    // --- drain stderr unconditionally (undrained stderr is the #1 deadlock
+    //     cause) AND forward it to the operator's stderr so logs aren't lost.
+    //     If forwarding errors, keep draining — draining is what prevents the
+    //     deadlock; visibility is best-effort.
     let stderr_task = tokio::spawn(async move {
         let mut stderr = stderr;
+        let mut client_err = client_err;
         let mut buf = vec![0u8; CHUNK];
         let mut total = 0u64;
+        let mut forwarding = true;
         loop {
             match stderr.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
-                Ok(n) => total += n as u64,
+                Ok(n) => {
+                    total += n as u64;
+                    if forwarding && client_err.write_all(&buf[..n]).await.is_err() {
+                        forwarding = false;
+                    }
+                }
             }
         }
+        let _ = client_err.flush().await;
         total
     });
 
@@ -171,45 +201,113 @@ where
     // --- write the spool to the client at the client's own pace, supervised.
     //     Timing the WRITE itself (not an idle poll) means we only ever flag a
     //     real stall: the server produced bytes and the client won't take them.
-    while let Some(chunk) = spool_rx.recv().await {
-        let wrote = tokio::time::timeout(stall_timeout, client_out.write_all(&chunk)).await;
-        match wrote {
-            Ok(Ok(())) => {
-                let _ = client_out.flush().await;
-                stats.stdout_bytes += chunk.len() as u64;
-            }
-            Ok(Err(e)) => return Err(e),
-            Err(_elapsed) => {
-                // True stall: server produced bytes, client won't accept them.
-                stats.stalled = true;
-                if supervisor::should_act(restart_policy, true) {
-                    tracing::warn!(
-                        target: "mcpdrain",
-                        stdout_bytes = stats.stdout_bytes,
-                        timeout = ?stall_timeout,
-                        "client-facing write stalled; aborting deadlocked server"
-                    );
-                    let _ = child.start_kill();
-                } else {
-                    tracing::warn!(
-                        target: "mcpdrain",
-                        "client-facing write stalled; restart policy is Never — reporting and exiting"
-                    );
-                }
+    //     A SIGINT/SIGTERM to mcpdrain breaks the loop so the child (which is in
+    //     its own process group and would otherwise be orphaned) is torn down.
+    let mut signals = Signals::install();
+    loop {
+        tokio::select! {
+            biased;
+            sig = signals.recv() => {
+                stats.interrupted = true;
+                tracing::warn!(target: "mcpdrain", signal = sig, "received signal; shutting down server");
                 break;
+            }
+            chunk = spool_rx.recv() => {
+                let Some(chunk) = chunk else { break };  // server stdout EOF: done
+                match tokio::time::timeout(stall_timeout, client_out.write_all(&chunk)).await {
+                    Ok(Ok(())) => {
+                        let _ = client_out.flush().await;
+                        stats.stdout_bytes += chunk.len() as u64;
+                    }
+                    Ok(Err(e)) => return Err(e),
+                    Err(_elapsed) => {
+                        // True stall: server produced bytes, client won't accept them.
+                        stats.stalled = true;
+                        if supervisor::should_act(restart_policy, true) {
+                            tracing::warn!(
+                                target: "mcpdrain",
+                                stdout_bytes = stats.stdout_bytes,
+                                timeout = ?stall_timeout,
+                                "client-facing write stalled; aborting deadlocked server"
+                            );
+                        } else {
+                            tracing::warn!(
+                                target: "mcpdrain",
+                                "client-facing write stalled; restart policy is Never — reporting and exiting"
+                            );
+                        }
+                        break;
+                    }
+                }
             }
         }
     }
 
-    // Cleanup: don't block on a client that keeps stdin open; reap the child.
+    // Cleanup: don't block on a client that keeps stdin open; reap the child and
+    // capture its exit status (None when *we* tore it down — stall or signal).
     stdin_task.abort();
-    shutdown_child(&mut child).await;
+    let exited = shutdown_child(&mut child).await;
+    stats.server_exit_code = exited.map(status_to_code);
 
-    stats.server_produced = stdout_task.await.unwrap_or(0);
-    stats.stderr_bytes = stderr_task.await.unwrap_or(0);
-    stats.stdin_bytes = stdin_task.await.unwrap_or(0);
+    stats.server_produced = reap_count(stdout_task).await;
+    stats.stderr_bytes = reap_count(stderr_task).await;
+    stats.stdin_bytes = reap_count(stdin_task).await;
 
     Ok(stats)
+}
+
+/// Cross-platform SIGINT/SIGTERM listener. On non-unix only Ctrl-C is available.
+struct Signals {
+    #[cfg(unix)]
+    term: tokio::signal::unix::Signal,
+}
+
+impl Signals {
+    fn install() -> Self {
+        #[cfg(unix)]
+        {
+            // SIGTERM in addition to Ctrl-C (SIGINT, via ctrl_c() below).
+            let term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler");
+            Signals { term }
+        }
+        #[cfg(not(unix))]
+        {
+            Signals {}
+        }
+    }
+
+    /// Resolve when SIGINT or SIGTERM arrives; returns the signal name.
+    async fn recv(&mut self) -> &'static str {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => "SIGINT",
+                _ = self.term.recv() => "SIGTERM",
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+            "SIGINT"
+        }
+    }
+}
+
+/// Map an exit status to a shell-style code: the real code, or `128 + signal`
+/// when the process was terminated by a signal.
+fn status_to_code(status: std::process::ExitStatus) -> i32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status
+            .code()
+            .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
+    }
+    #[cfg(not(unix))]
+    {
+        status.code().unwrap_or(0)
+    }
 }
 
 /// Put the child in its own process group so we can clean it up without
@@ -228,16 +326,61 @@ fn new_process_group(command: &mut Command) {
 #[cfg(not(unix))]
 fn new_process_group(_command: &mut Command) {}
 
-async fn shutdown_child(child: &mut Child) {
-    // Give the server a moment to exit on its own (stdin closed → most servers
-    // quit), then force-kill so a lingering server can never hang mcpdrain.
+/// Signal the child's whole process *group* (it leads its own group via
+/// `setpgid`), so a server that forked helpers — `sh -c 'real-server'`, an `npx`
+/// shim, etc. — is torn down completely instead of leaving a grandchild holding
+/// the stdout pipe open (which would hang mcpdrain's cleanup forever).
+#[cfg(unix)]
+fn signal_group(child: &Child, sig: i32) {
+    if let Some(pid) = child.id() {
+        // SAFETY: a negative pid targets the process group led by `pid`; we made
+        // the child its own group leader, so this hits the server + its helpers.
+        // Harmless (ESRCH) if the group is already gone.
+        unsafe {
+            libc::kill(-(pid as i32), sig);
+        }
+    }
+}
+
+/// Reap the child, returning its status if it exited on its own (within the
+/// grace period), or `None` if mcpdrain had to force-kill it.
+///
+/// Order: if it already exited, reap it. Otherwise ask the whole process group
+/// politely (SIGTERM) and wait the grace period; if still alive, SIGKILL the
+/// group so a lingering server can never hang mcpdrain.
+async fn shutdown_child(child: &mut Child) -> Option<std::process::ExitStatus> {
+    if let Ok(Some(status)) = child.try_wait() {
+        tracing::debug!(target: "mcpdrain", ?status, "server already exited");
+        return Some(status);
+    }
+    #[cfg(unix)]
+    signal_group(child, libc::SIGTERM);
     match tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await {
-        Ok(status) => tracing::debug!(target: "mcpdrain", ?status, "server exited"),
-        Err(_) => {
+        Ok(Ok(status)) => {
+            tracing::debug!(target: "mcpdrain", ?status, "server exited after SIGTERM");
+            Some(status)
+        }
+        _ => {
+            #[cfg(unix)]
+            signal_group(child, libc::SIGKILL);
+            #[cfg(not(unix))]
             let _ = child.start_kill();
-            if let Ok(status) = child.wait().await {
-                tracing::debug!(target: "mcpdrain", ?status, "server killed");
-            }
+            let _ = child.wait().await;
+            tracing::debug!(target: "mcpdrain", "server force-killed");
+            None
+        }
+    }
+}
+
+/// Await a drain task for its byte count, but never let cleanup hang: if the
+/// task hasn't finished shortly after the child is gone, abort it and report 0.
+async fn reap_count(mut task: tokio::task::JoinHandle<u64>) -> u64 {
+    match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+        Ok(Ok(n)) => n,
+        Ok(Err(_)) => 0,
+        Err(_) => {
+            task.abort();
+            0
         }
     }
 }
