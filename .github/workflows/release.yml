@@ -45,7 +45,7 @@ jobs:
           mkdir -p dist
           cp "$src" "dist/mcpdrain-${target}"
           tar -czf "dist/mcpdrain-${target}.tar.gz" -C dist "mcpdrain-${target}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mcpdrain-${{ matrix.target }}
           path: dist/*.tar.gz
