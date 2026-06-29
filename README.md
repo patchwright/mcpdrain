@@ -25,17 +25,15 @@ OS pipe capacity ≈ 65536 bytes (64 KiB).
 ## Install
 
 ```bash
-# Cargo
+# Cargo (any platform with a Rust toolchain)
 cargo install mcpdrain
 
-# Homebrew
-brew install patchwright/tap/mcpdrain   # (formula pending first release)
-
-# curl | sh
+# curl | sh — prebuilt binary, no toolchain needed
 curl -fsSL https://raw.githubusercontent.com/patchwright/mcpdrain/main/install.sh | sh
 ```
 
-Prebuilt musl/macOS-universal/Windows binaries land on the first release.
+Prebuilt static binaries ship for `x86_64`/`aarch64` Linux (musl) and macOS on
+each release. A Homebrew tap and Windows support are planned for a later release.
 
 ## 30-second usage
 

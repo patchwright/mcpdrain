@@ -14,10 +14,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Targets must match install.sh exactly: Linux→musl (static, portable),
+        # macOS→per-arch. Both arches each, so curl|sh resolves on every platform.
         include:
-          - { target: x86_64-unknown-linux-gnu,  os: ubuntu-latest, cross: false }
           - { target: x86_64-unknown-linux-musl,  os: ubuntu-latest, cross: true  }
-          - { target: aarch64-unknown-linux-gnu,  os: ubuntu-latest, cross: true  }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, cross: true  }
           - { target: x86_64-apple-darwin,        os: macos-latest,  cross: false }
           - { target: aarch64-apple-darwin,       os: macos-latest,  cross: false }
     runs-on: ${{ matrix.os }}
