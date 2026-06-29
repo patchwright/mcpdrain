@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu,  os: ubuntu-latest, cross: false }
+          - { target: x86_64-unknown-linux-musl,  os: ubuntu-latest, cross: true  }
+          - { target: aarch64-unknown-linux-gnu,  os: ubuntu-latest, cross: true  }
+          - { target: x86_64-apple-darwin,        os: macos-latest,  cross: false }
+          - { target: aarch64-apple-darwin,       os: macos-latest,  cross: false }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cross
+        if: ${{ matrix.cross }}
+      - name: Build
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --locked --target ${{ matrix.target }} -p mcpdrain
+          else
+            cargo build --release --locked --target ${{ matrix.target }} -p mcpdrain
+          fi
+      - name: Package
+        run: |
+          set -e
+          target="${{ matrix.target }}"
+          src="target/${target}/release/mcpdrain"
+          test -f "$src" || { echo "missing $src"; exit 1; }
+          mkdir -p dist
+          cp "$src" "dist/mcpdrain-${target}"
+          tar -czf "dist/mcpdrain-${target}.tar.gz" -C dist "mcpdrain-${target}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcpdrain-${{ matrix.target }}
+          path: dist/*.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          generate_release_notes: true

@@ -1,0 +1,19 @@
+[package]
+name = "mcpdrain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deadlock-proof stdio guardian for MCP servers."
+
+[[bin]]
+name = "mcpdrain"
+path = "src/main.rs"
+
+[dependencies]
+mcpdrain-core = { path = "../mcpdrain-core", version = "0.1.0" }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
