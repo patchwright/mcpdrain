@@ -85,7 +85,7 @@ client stdout ◄─  mcpdrain  ◄─  server stdout   (spooled: never blocks t
 cargo test --all           # incl. the deadlock-reproduction integration test
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all --check
-MSRV: 1.75 · License: Apache-2.0
+MSRV: 1.85 · License: Apache-2.0
 ```
 
 The credibility test (`crates/mcpdrain-core/tests/deadlock.rs`) spawns a server that floods 256 KiB to **stderr** then emits 256 KiB to stdout, proxies it through `mcpdrain`, and asserts the full response is delivered. A client that doesn't drain stderr concurrently deadlocks on this; `mcpdrain` does not.
