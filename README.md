@@ -10,6 +10,8 @@
 
 `mcpdrain` is a **deadlock-proof stdio guardian for MCP (Model Context Protocol) servers.** Drop it between any MCP client and any stdio MCP server: it concurrently drains stdin, stdout, **and** stderr so the server can never block on a full pipe buffer, and it recovers from client-side stalls.
 
+![mcpdrain demo: a chatty server deadlocks a naive client, then mcpdrain delivers the response](docs/demo.gif)
+
 ## Is this your hang?
 
 - Your **MCP server hangs** and the client just says "Running…" forever, with no error.
